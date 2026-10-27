@@ -67,16 +67,21 @@ pub async fn vmaf(
         bar.set_length(nframes);
     }
 
+    let (cpu_filter, cuda_filter) = vmaf.ffmpeg_lavfi_attempts(
+        dprobe.resolution,
+        PixelFormat::opt_max(dprobe.pixel_format(), rprobe.pixel_format()),
+        score.reference_vfilter.as_deref(),
+        (dprobe.pixel_format(), rprobe.pixel_format()),
+    );
+    let input_args = vmaf.input_args();
     let mut vmaf = pin!(vmaf::run(
         &reference,
         &distorted,
-        &vmaf.ffmpeg_lavfi(
-            dprobe.resolution,
-            PixelFormat::opt_max(dprobe.pixel_format(), rprobe.pixel_format()),
-            score.reference_vfilter.as_deref(),
-        ),
+        &input_args,
+        &cpu_filter,
+        cuda_filter.as_deref(),
         vmaf.fps(),
-    )?);
+    ));
     let mut logger = ProgressLogger::new(module_path!(), Instant::now());
     let mut vmaf_score = None;
     while let Some(vmaf) = vmaf.next().await {

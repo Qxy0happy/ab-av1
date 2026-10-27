@@ -2,75 +2,125 @@
 use crate::process::{Chunks, CommandExt, FfmpegOut, cmd_err, exit_ok_stderr};
 use anyhow::Context;
 use log::{debug, info};
-use std::{path::Path, process::Stdio};
+use std::{path::Path, process::Stdio, sync::Arc};
 use tokio::process::Command;
 use tokio_process_stream::{Item, ProcessChunkStream};
 use tokio_stream::{Stream, StreamExt};
 
 /// Calculate VMAF score using ffmpeg.
+///
+/// `input_args` are ffmpeg input options applied to both inputs.
+/// When `cuda_filter` is provided it's tried first, falling back to `cpu_filter` if the
+/// GPU run fails or produces no score.
 pub fn run(
     reference: &Path,
     distorted: &Path,
-    filter_complex: &str,
+    input_args: &[Arc<str>],
+    cpu_filter: &str,
+    cuda_filter: Option<&str>,
     fps: Option<f32>,
-) -> anyhow::Result<impl Stream<Item = VmafOut> + use<>> {
+) -> impl Stream<Item = VmafOut> + use<> {
     info!(
         "vmaf {} vs reference {}",
         distorted.file_name().and_then(|n| n.to_str()).unwrap_or(""),
         reference.file_name().and_then(|n| n.to_str()).unwrap_or(""),
     );
 
-    let mut cmd = Command::new("ffmpeg");
-    cmd.kill_on_drop(true)
-        .arg2_opt("-r", fps)
-        .arg2("-i", distorted)
-        .arg2_opt("-r", fps)
-        .arg2("-i", reference)
-        .arg2("-filter_complex", filter_complex)
-        // Workaround unused streams causing ffmpeg memory leaks
-        // See https://github.com/alexheretic/ab-av1/issues/189
-        .arg("-an")
-        .arg("-sn")
-        .arg("-dn")
-        .arg2("-f", "null")
-        .arg("-")
-        .stdin(Stdio::null());
+    let mut attempts = Vec::new();
+    if let Some(cuda_filter) = cuda_filter {
+        attempts.push((cuda_filter.to_owned(), true));
+    }
+    attempts.push((cpu_filter.to_owned(), false));
+    let (reference, distorted) = (reference.to_owned(), distorted.to_owned());
+    let input_args: Vec<Arc<str>> = input_args.to_vec();
 
-    let cmd_str = cmd.to_cmd_str();
-    debug!("cmd `{cmd_str}`");
-    let mut vmaf = crate::process::child::AddOnDropChunkStream::from(
-        ProcessChunkStream::try_from(cmd).context("ffmpeg vmaf")?,
-    );
-
-    Ok(async_stream::stream! {
-        let mut chunks = Chunks::default();
-        let mut parsed_done = false;
-        while let Some(next) = vmaf.next().await {
-            match next {
-                Item::Stderr(chunk) => {
-                    if let Some(out) = VmafOut::try_from_chunk(&chunk, &mut chunks) {
-                        if matches!(out, VmafOut::Done(_)) {
-                            parsed_done = true;
-                        }
-                        yield out;
-                    }
+    async_stream::stream! {
+        for (filter_complex, cuda) in attempts {
+            let mut cmd = Command::new("ffmpeg");
+            cmd.kill_on_drop(true);
+            if cuda {
+                cmd.arg2("-init_hw_device", "cuda=ab_av1")
+                    .arg2("-filter_hw_device", "ab_av1");
+            }
+            for input in [&distorted, &reference] {
+                cmd.arg2_opt("-r", fps);
+                for arg in &input_args {
+                    cmd.arg(&**arg);
                 }
-                Item::Stdout(_) => {}
-                Item::Done(code) => {
-                    if let Err(err) = exit_ok_stderr("ffmpeg vmaf", code, &cmd_str, &chunks) {
-                        yield VmafOut::Err(err);
+                cmd.arg2("-i", input);
+            }
+            cmd.arg2("-filter_complex", filter_complex)
+                // Workaround unused streams causing ffmpeg memory leaks
+                // See https://github.com/alexheretic/ab-av1/issues/189
+                .arg("-an")
+                .arg("-sn")
+                .arg("-dn")
+                .arg2("-f", "null")
+                .arg("-")
+                .stdin(Stdio::null());
+
+            let cmd_str = cmd.to_cmd_str();
+            debug!("cmd `{cmd_str}`");
+            let mut vmaf = match ProcessChunkStream::try_from(cmd)
+                .context("ffmpeg vmaf")
+                .map(crate::process::child::AddOnDropChunkStream::from)
+            {
+                Ok(vmaf) => vmaf,
+                Err(err) if cuda => {
+                    info!("vmaf cuda unavailable, falling back to cpu: {err:#}");
+                    continue;
+                }
+                Err(err) => {
+                    yield VmafOut::Err(err);
+                    break;
+                }
+            };
+
+            let mut chunks = Chunks::default();
+            let mut parsed_done = false;
+            let mut err = None;
+            while let Some(next) = vmaf.next().await {
+                match next {
+                    Item::Stderr(chunk) => {
+                        if let Some(out) = VmafOut::try_from_chunk(&chunk, &mut chunks) {
+                            if matches!(out, VmafOut::Done(_)) {
+                                parsed_done = true;
+                            }
+                            yield out;
+                        }
+                    }
+                    Item::Stdout(_) => {}
+                    Item::Done(code) => {
+                        if let Err(e) = exit_ok_stderr("ffmpeg vmaf", code, &cmd_str, &chunks) {
+                            err = Some(e);
+                        }
                     }
                 }
             }
-        }
-        if !parsed_done {
+
+            if let Some(err) = err {
+                if cuda {
+                    info!("vmaf cuda failed, falling back to cpu: {err:#}");
+                    continue;
+                }
+                yield VmafOut::Err(err);
+                break;
+            }
+            if parsed_done {
+                break;
+            }
+            if cuda {
+                info!("vmaf cuda produced no score, falling back to cpu");
+                continue;
+            }
             yield VmafOut::Err(cmd_err(
                 "could not parse ffmpeg vmaf score",
                 &cmd_str,
                 &chunks,
             ));
+            break;
         }
-    })
+    }
 }
 
 #[derive(Debug)]

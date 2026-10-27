@@ -74,6 +74,14 @@ Works with videos and images.
 * Auto sets model version (4k or 1k) according to resolution.
 * Auto sets _n_threads_ to system threads.
 * Auto upscales lower resolution videos to the model.
+* `--cuda-vmaf` calculates VMAF on the GPU using ffmpeg's `libvmaf_cuda` filter, falling back
+  to CPU `libvmaf` if the GPU run fails. Filters & scaling are unchanged, frames are uploaded
+  to the GPU as the last step. VMAF is computed on 8-bit `yuv420p` frames in this mode.
+* `--vmaf-input` passes ffmpeg input options to both vmaf inputs, e.g.
+  `--vmaf-input hwaccel=cuda --vmaf-input hwaccel_output_format=cuda` decodes with the GPU.
+  Hardware frames are downloaded inside the filter graph (`nv12`/`p010le` per input), so
+  filters, scaling and scores are unchanged. With `hwaccel_output_format` both inputs must be
+  hardware decodable; plain `hwaccel=cuda` falls back per input and is the safer choice.
 
 ```
 ab-av1 vmaf --reference <REFERENCE> --distorted <DISTORTED>

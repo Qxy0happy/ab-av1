@@ -288,6 +288,7 @@ pub fn run(
                     let encode_time = b.elapsed();
                     let encoded_size = fs::metadata(&encoded_sample).await?.len();
                     let encoded_probe = ffprobe::probe(&encoded_sample);
+                    let encoded_pix_fmt = encoded_probe.pixel_format();
 
                     let mut result = EncodeResult {
                         vmaf_score: None,
@@ -366,16 +367,21 @@ pub fn run(
                             sample: sample_n,
                             samples,
                         });
+                        let (cpu_filter, cuda_filter) = vmaf.ffmpeg_lavfi_attempts(
+                            encoded_probe.resolution,
+                            PixelFormat::opt_max(enc_args.pix_fmt, input_pix_fmt),
+                            score.reference_vfilter.as_deref().or(args.vfilter.as_deref()),
+                            (encoded_pix_fmt, input_pix_fmt),
+                        );
+                        let input_args = vmaf.input_args();
                         let vmaf = vmaf::run(
                             &sample,
                             &encoded_sample,
-                            &vmaf.ffmpeg_lavfi(
-                                encoded_probe.resolution,
-                                PixelFormat::opt_max(enc_args.pix_fmt, input_pix_fmt),
-                                score.reference_vfilter.as_deref().or(args.vfilter.as_deref()),
-                            ),
+                            &input_args,
+                            &cpu_filter,
+                            cuda_filter.as_deref(),
                             vmaf.fps(),
-                        )?;
+                        );
                         let mut vmaf = pin!(vmaf);
                         let mut logger = ProgressLogger::new("ab_av1::vmaf", Instant::now());
                         while let Some(vmaf) = vmaf.next().await {

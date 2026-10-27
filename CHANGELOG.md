@@ -1,3 +1,13 @@
+# v0.11.8
+* Add `--cuda-vmaf` to calculate VMAF on the GPU with ffmpeg's `libvmaf_cuda` filter, falling
+  back to CPU `libvmaf` if the GPU run fails. Filters, scaling & the model are unchanged; frames
+  are uploaded with `hwupload_cuda` as the last step. VMAF is computed on 8-bit `yuv420p` frames
+  in this mode. Sample-encode caching keys include the flag, so GPU & CPU scores aren't mixed.
+* Add `--vmaf-input` to pass ffmpeg input options to both vmaf inputs, e.g.
+  `--vmaf-input hwaccel=cuda --vmaf-input hwaccel_output_format=cuda` for GPU decoding.
+  Hardware frames are downloaded per input (`nv12`/`p010le`) before the usual filters, so
+  scaling and scores are unchanged.
+
 # v0.11.7
 * Add encode & auto-encode `--verify`, decoding the finished encode & failing on decode errors
   or a duration mismatch with the input. ffmpeg can otherwise exit successfully having written
